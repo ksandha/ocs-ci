@@ -14,6 +14,8 @@ from utility.aws import AWS
 from utility.retry import retry
 from utility.utils import run_cmd, download_openshift_installer
 
+from ocs.utils import parallel
+from ocs.rook import Rook
 log = logging.getLogger(__name__)
 
 
@@ -27,6 +29,7 @@ def run(**kwargs):
     ):
         return TestStatus.SKIPPED
     config = kwargs.get('config')
+    create_fs = config.get('filesystem',None)
     cluster_conf = kwargs.get('cluster_conf')
     workers = masters = aws_region = None
     if cluster_conf:
@@ -141,6 +144,17 @@ def run(**kwargs):
     )
     create_oc_resource('cluster.yaml', rook_data, cluster_path, _templating)
     create_oc_resource('toolbox.yaml', rook_data, cluster_path, _templating)
+    if create_fs:
+        rook_obj = Rook()
+        rook_cluster = rook_obj.cluster
+
+        fs_data = {
+            'fs_name': 'cephfs'}
+        rc = rook_cluster.create_cephfs(fs_data=fs_data)
+        if rc == 0:
+            log.info('filesystem created')
+        else:
+            return 1
     log.info(f"Waiting {wait_time} seconds...")
     time.sleep(wait_time)
     create_oc_resource(
@@ -164,8 +178,7 @@ def run(**kwargs):
 def create_ebs_volumes(
     worker_pattern,
     size=100,
-    region_name=default.AWS_REGION
-):
+    region_name=default.AWS_REGION):
     """
     Create volumes on workers
 
@@ -177,16 +190,16 @@ def create_ebs_volumes(
     """
     aws = AWS(region_name)
     worker_instances = aws.get_instances_by_name_pattern(worker_pattern)
-    for worker in worker_instances:
-        log.info(
-            f"Creating and attaching {size} GB volume to {worker['name']}"
-        )
-        aws.create_volume_and_attach(
+    with parallel() as p:
+        for worker in worker_instances:
+            log.info(
+                f"Creating and attaching {size} GB volume to {worker['name']}"
+            )
+            p.spawn(aws.create_volume_and_attach(
             availability_zone=worker['avz'],
             instance_id=worker['id'],
             name=f"{worker['name']}_extra_volume",
-            size=size,
-        )
+            size=size))
 
 
 @retry((CephHealthException, CommandFailed), tries=20, delay=30, backoff=1)
